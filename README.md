@@ -1,8 +1,7 @@
 # Voice Notes Toolkit
 
-Two Tkinter apps that work with the `voice_notes` SQLite database:
-- **Voice Note Analyst Pro 2.0** (`Audio_transcribe.py`): transcribe audio files with Whisper, summarize/analyze via OpenAI or Ollama, and store results.
-- **Voice Notes SQL Assistant** (`voice_notes_query_gui.py`): turn plain-English questions into safe SQLite queries (OpenAI `gpt-5`) and browse results.
+Tkinter toolkit for working with the `voice_notes` SQLite database:
+- **Voice Note Analyst Pro 2.0** (`Audio_transcribe.py`): transcribe audio files with Whisper, summarize/analyze via OpenAI or Ollama, store results, browse history, and query the DB via the Explore tab.
 
 ## Requirements
 - Python 3.10+ recommended.
@@ -30,6 +29,7 @@ What it does
 - Analyzes transcripts via OpenAI Chat or Ollama to extract summary, calls_to_action, tone, people_mentioned, tags, and subject (JSON response enforced).
 - Persists everything into `voice_notes` table in `voice_notes_data.db`.
 - Library tab to search, preview, export to Markdown, and play audio files.
+- Explore tab to query the SQLite DB with plain English (same flow as the standalone SQL assistant below).
 
 Run
 ```bash
@@ -43,25 +43,6 @@ Flow
 Notes
 - MPS fallback is enabled for macOS; CUDA is used when available, otherwise CPU.
 - Uses table `voice_notes` (schema below) and creates it if missing.
-
-## App 2: Voice Notes SQL Assistant (`voice_notes_query_gui.py`)
-What it does
-- Introspects any selected SQLite DB, lets you pick a table, and lists its fields.
-- Sends your plain-English prompt to OpenAI (`gpt-5`) to generate SELECT-only SQL with a default `LIMIT 200`.
-- Runs the SQL and shows results in a grid; you can edit the SQL before running.
-
-Run
-```bash
-python voice_notes_query_gui.py
-```
-Flow
-1) On launch, tries `voice_notes_data.db` (or `voice_notes_data.db.sql` if that’s all that’s present).  
-2) Use **Choose DB...** to point at another `.db/.sqlite` file; pick a table from the dropdown.  
-3) Enter a request, **Generate SQL**, review/edit, then **Run Query** to view results.
-
-Notes
-- Guardrails enforce SELECT/CTE only; disallowed keywords are blocked and a LIMIT is added if missing.
-- Works with arbitrary SQLite databases (table/field list updates when you switch).
 
 ## Database Schema
 `voice_notes_data.db.sql` documents the `voice_notes` table:

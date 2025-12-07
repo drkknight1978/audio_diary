@@ -10,6 +10,7 @@ import os
 import sqlite3
 import datetime
 import json
+import re
 import requests
 import traceback
 import subprocess
@@ -142,6 +143,96 @@ class DatabaseHandler:
         conn.commit()
         conn.close()
 
+
+# -------------------------------------------------------------------------
+# SQL helper utilities (shared with Explore tab)
+# -------------------------------------------------------------------------
+def fetch_tables(db_path: Path):
+    if not Path(db_path).exists():
+        raise FileNotFoundError(f"SQLite database not found: {db_path}")
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+        tables = [row[0] for row in cur.fetchall()]
+    finally:
+        conn.close()
+    if not tables:
+        raise RuntimeError(f"No user tables found in database: {db_path}")
+    return tables
+
+
+def fetch_columns(db_path: Path, table_name: str):
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.execute(f'PRAGMA table_info("{table_name}")')
+        columns = [(row[1], row[2] or "TEXT") for row in cur.fetchall()]
+    finally:
+        conn.close()
+    if not columns:
+        raise RuntimeError(f"No columns found for table '{table_name}'.")
+    return columns
+
+
+def build_query_system_prompt(columns, table_name):
+    column_lines = "\n".join(f"- {name} ({ctype})" for name, ctype in columns)
+    return f"""You are an assistant that writes SQLite SELECT queries for the '{table_name}' table.
+Columns:
+{column_lines}
+
+Rules:
+- Return only the SQL query text; no prose or code fences.
+- Use only SELECT (or CTE + SELECT). Do not use INSERT, UPDATE, DELETE, DROP, ALTER, PRAGMA, or ATTACH.
+- Default to LIMIT 200 rows unless the user explicitly asks for aggregated results such as COUNT or summary statistics.
+- Use double quotes around column names when helpful.
+- For text matching, use LIKE with wildcards and LOWER(...) to make comparisons case-insensitive.
+- date_recorded and date_processed are timestamp strings; use date() or substr if needed for date filtering.
+"""
+
+
+def extract_sql(text):
+    text = (text or "").strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].strip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[0].lower().startswith("sql"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    return text
+
+
+def validate_sql(sql):
+    lowered = sql.strip().lower()
+    if not lowered:
+        raise ValueError("Empty SQL returned.")
+    if not (lowered.startswith("select") or lowered.startswith("with")):
+        raise ValueError("Only SELECT statements are allowed.")
+    if re.search(r"\b(insert|update|delete|drop|alter|pragma|attach|vacuum)\b", lowered):
+        raise ValueError("Disallowed SQL keyword detected.")
+    return sql
+
+
+def ensure_limit(sql, default_limit=200):
+    sql_no_semicolon = sql.rstrip().rstrip(";")
+    lowered = sql_no_semicolon.lower()
+    if re.search(r"\blimit\s+\d+(\s*,\s*\d+)?\s*$", lowered):
+        return sql_no_semicolon + ";"
+    return f"{sql_no_semicolon} LIMIT {default_limit};"
+
+
+def execute_sql_query(sql, db_path: Path):
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        cursor = conn.execute(sql)
+        rows = cursor.fetchall()
+        headers = [col[0] for col in cursor.description] if cursor.description else []
+    finally:
+        conn.close()
+    return headers, rows
+
 # -------------------------------------------------------------------------
 # 3. AI Backends
 # -------------------------------------------------------------------------
@@ -222,6 +313,10 @@ class VoiceNoteApp(tb.Window):
         self.tab_library = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_library, text=" 📚 Library & History ")
         self.build_library_tab()
+        # Tab 3: Explore (SQL assistant)
+        self.tab_explore = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_explore, text=" Explore ")
+        self.build_explore_tab()
 
     # ---------------------------------------------------------------------
     # Tab 1: Processing Logic
@@ -602,6 +697,242 @@ class VoiceNoteApp(tb.Window):
             with open(save_path, 'w', encoding='utf-8') as f:
                 f.write(content)
             messagebox.showinfo("Exported", f"Saved to {save_path}")
+
+    # ---------------------------------------------------------------------
+    # Tab 3: Explore (SQL assistant)
+    # ---------------------------------------------------------------------
+    def build_explore_tab(self):
+        self.explore_db_path = Path(self.db.db_name)
+        self.explore_tables = []
+        self.explore_columns = []
+        self.explore_table_var = tk.StringVar()
+        self.explore_status_var = tk.StringVar(value="Ready")
+
+        main = ttk.Frame(self.tab_explore, padding=12)
+        main.pack(fill="both", expand=True)
+
+        db_row = ttk.Frame(main)
+        db_row.pack(fill="x", pady=(0, 8))
+        tb.Label(db_row, text="Database:").pack(side="left")
+        self.lbl_explore_db = tb.Label(db_row, text=str(self.explore_db_path))
+        self.lbl_explore_db.pack(side="left", padx=(6, 8))
+        tb.Button(db_row, text="Choose DB...", bootstyle="secondary", command=self.handle_choose_db).pack(side="left")
+
+        fields_frame = tb.Labelframe(main, text="Fields", padding=8)
+        fields_frame.pack(side="left", fill="y", padx=(0, 10))
+        self.fields_list_explore = tk.Listbox(fields_frame, height=12)
+        self.fields_list_explore.pack(fill="both", expand=True, padx=4, pady=4)
+        self.fields_frame_explore = fields_frame
+
+        right_frame = ttk.Frame(main)
+        right_frame.pack(side="left", fill="both", expand=True)
+
+        table_row = ttk.Frame(right_frame)
+        table_row.pack(fill="x", pady=(0, 6))
+        tb.Label(table_row, text="Table:").pack(side="left")
+        self.table_combo_explore = ttk.Combobox(table_row, textvariable=self.explore_table_var, state="readonly")
+        self.table_combo_explore.pack(side="left", fill="x", expand=True, padx=(6, 0))
+        self.table_combo_explore.bind("<<ComboboxSelected>>", self.handle_explore_table_change)
+
+        tb.Label(right_frame, text="Ask in plain English").pack(anchor="w")
+        self.prompt_text_explore = ScrolledText(right_frame, height=5)
+        self.prompt_text_explore.pack(fill="x", pady=(2, 8))
+
+        btn_row = ttk.Frame(right_frame)
+        btn_row.pack(fill="x")
+        self.btn_generate_sql_explore = tb.Button(btn_row, text="Generate SQL", bootstyle="primary", command=self.handle_generate_sql_explore)
+        self.btn_generate_sql_explore.pack(side="left")
+        self.btn_run_sql_explore = tb.Button(btn_row, text="Run Query", bootstyle="success", command=self.handle_run_sql_explore)
+        self.btn_run_sql_explore.pack(side="left", padx=(6, 0))
+
+        tb.Label(right_frame, text="Generated SQL (editable)").pack(anchor="w", pady=(10, 0))
+        self.sql_text_explore = ScrolledText(right_frame, height=8)
+        self.sql_text_explore.pack(fill="both", expand=True, pady=(2, 8))
+
+        self.lbl_explore_status = ttk.Label(self.tab_explore, textvariable=self.explore_status_var, anchor="w", relief="sunken")
+        self.lbl_explore_status.pack(fill="x", padx=12, pady=(0, 8))
+
+        self.load_explore_db(self.explore_db_path)
+
+    def load_explore_db(self, db_path: Path):
+        try:
+            tables = fetch_tables(db_path)
+        except Exception as exc:
+            self.explore_status_var.set("Database load failed")
+            messagebox.showerror("Database error", str(exc))
+            return
+
+        self.explore_db_path = Path(db_path)
+        self.lbl_explore_db.config(text=str(self.explore_db_path))
+        self.explore_tables = tables
+        preferred = "voice_notes" if "voice_notes" in tables else tables[0]
+        self.table_combo_explore["values"] = tables
+        self.explore_table_var.set(preferred)
+        self.load_explore_table(preferred)
+
+    def load_explore_table(self, table_name: str):
+        try:
+            self.explore_columns = fetch_columns(self.explore_db_path, table_name)
+        except Exception as exc:
+            self.explore_status_var.set("Table load failed")
+            messagebox.showerror("Schema error", str(exc))
+            return
+        self.refresh_explore_fields()
+        self.explore_status_var.set(f"Using table '{table_name}' from {self.explore_db_path.name}")
+
+    def refresh_explore_fields(self):
+        self.fields_list_explore.delete(0, tk.END)
+        for name, ctype in self.explore_columns:
+            self.fields_list_explore.insert(tk.END, f"{name} ({ctype})")
+        self.fields_frame_explore.config(text=f"Fields in {self.explore_table_var.get()}")
+        self.fields_list_explore.configure(height=max(len(self.explore_columns), 8))
+
+    def set_explore_busy(self, busy: bool = True, status: str | None = None):
+        state = "disabled" if busy else "normal"
+        if hasattr(self, "btn_generate_sql_explore"):
+            self.btn_generate_sql_explore.config(state=state)
+        if hasattr(self, "btn_run_sql_explore"):
+            self.btn_run_sql_explore.config(state=state)
+        if status is not None:
+            self.explore_status_var.set(status)
+
+    def handle_explore_table_change(self, _event=None):
+        selection = self.explore_table_var.get()
+        if selection:
+            self.load_explore_table(selection)
+
+    def handle_choose_db(self):
+        file_path = filedialog.askopenfilename(
+            title="Select SQLite database",
+            filetypes=[("SQLite DB", "*.db *.sqlite *.sqlite3"), ("All files", "*.*")],
+        )
+        if not file_path:
+            return
+        self.load_explore_db(Path(file_path))
+
+    def handle_generate_sql_explore(self):
+        user_prompt = self.prompt_text_explore.text.get("1.0", "end").strip()
+        if not user_prompt:
+            messagebox.showinfo("Missing input", "Please enter what you want to ask about the data.")
+            return
+        if not self.explore_columns:
+            messagebox.showerror("Schema error", "No columns available; select a database/table first.")
+            return
+
+        key = self.api_key_var.get().strip()
+        model = self.openai_model_var.get().strip() or "gpt-5"
+        if not key:
+            messagebox.showerror("Missing key", "Enter an OpenAI API key in the Configuration section.")
+            return
+
+        table_name = self.explore_table_var.get()
+        self.set_explore_busy(True, "Contacting OpenAI...")
+
+        def worker():
+            try:
+                client = OpenAI(api_key=key)
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": build_query_system_prompt(self.explore_columns, table_name)},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                )
+                content = response.choices[0].message.content
+                sql = extract_sql(content)
+                sql = ensure_limit(validate_sql(sql))
+            except Exception as exc:
+                def fail():
+                    self.set_explore_busy(False, "Failed to generate SQL")
+                    messagebox.showerror("OpenAI error", str(exc))
+                self.after(0, fail)
+                return
+
+            def finish():
+                self.sql_text_explore.text.delete("1.0", "end")
+                self.sql_text_explore.text.insert("1.0", sql)
+                self.set_explore_busy(False, "SQL generated; review or run it.")
+            self.after(0, finish)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def handle_run_sql_explore(self):
+        sql = self.sql_text_explore.text.get("1.0", "end").strip()
+        if not sql:
+            messagebox.showinfo("Missing SQL", "Generate or type a SQL query first.")
+            return
+        self.set_explore_busy(True, "Running query...")
+
+        def worker():
+            try:
+                sql_clean = ensure_limit(validate_sql(sql))
+                headers, rows = execute_sql_query(sql_clean, self.explore_db_path)
+            except Exception as exc:
+                def fail():
+                    self.set_explore_busy(False, "Query error")
+                    messagebox.showerror("Query error", str(exc))
+                self.after(0, fail)
+                return
+
+            def finish():
+                self.set_explore_busy(False, f"Query ran successfully ({len(rows)} rows).")
+                self.show_results_explore(headers, rows)
+            self.after(0, finish)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def show_results_explore(self, headers, rows):
+        window = tk.Toplevel(self)
+        window.title("Query Results")
+        window.geometry("1000x600")
+
+        frame = ttk.Frame(window, padding=10)
+        frame.pack(fill="both", expand=True)
+
+        tree = ttk.Treeview(frame, columns=headers, show="headings")
+        for col in headers:
+            tree.heading(col, text=col)
+            tree.column(col, anchor="w", width=150)
+
+        vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        hsb = ttk.Scrollbar(frame, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
+        tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
+
+        max_chars = 300
+        clean_rows = []
+        for row in rows:
+            vals = []
+            for col in headers:
+                val = row[col]
+                if val is None:
+                    val = ""
+                val = str(val).replace("\n", " ")
+                if len(val) > max_chars:
+                    val = val[:max_chars] + "…"
+                vals.append(val)
+            clean_rows.append(vals)
+
+        batch_size = 100
+        total = len(clean_rows)
+
+        def insert_batch(start=0):
+            end = min(start + batch_size, total)
+            for vals in clean_rows[start:end]:
+                tree.insert("", tk.END, values=vals)
+            if end < total:
+                window.after(1, insert_batch, end)
+
+        insert_batch(0)
+
+        footer = ttk.Label(frame, text=f"{len(rows)} rows returned.")
+        footer.grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
 if __name__ == "__main__":
     try:
