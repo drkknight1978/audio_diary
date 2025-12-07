@@ -7,6 +7,8 @@ __pycache__/
 .venv/
 env/
 venv/
+mac/
+win/
 # IDE/editor
 .vscode/
 .idea/
@@ -18,4 +20,3 @@ audio/
 voice_notes_data.db
 vna_config.json
 audio.mp3
-
