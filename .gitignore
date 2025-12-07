@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.class
+# Virtual environments
+.env
+.venv/
+env/
+venv/
+# IDE/editor
+.vscode/
+.idea/
+# OS artifacts
+.DS_Store
+Thumbs.db
+# Data files
+audio/
+voice_notes_data.db
+vna_config.json
+

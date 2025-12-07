@@ -1,0 +1,75 @@
+# Voice Notes Toolkit
+
+Two Tkinter apps that work with the `voice_notes` SQLite database:
+- **Voice Note Analyst Pro 2.0** (`Audio_transcribe.py`): transcribe audio files with Whisper, summarize/analyze via OpenAI or Ollama, and store results.
+- **Voice Notes SQL Assistant** (`voice_notes_query_gui.py`): turn plain-English questions into safe SQLite queries (OpenAI `gpt-5`) and browse results.
+
+## Requirements
+- Python 3.10+ recommended.
+- Install deps: `pip install -r requirements.txt`  
+  (includes `ttkbootstrap`, `openai`, `openai-whisper`, `torch`, `requests`).
+- Whisper/torch typically need FFmpeg available on PATH for audio decoding.
+
+## Configuration (`vna_config.json`)
+This file is git-ignored. Example:
+```json
+{
+  "provider": "OpenAI",
+  "openai_key": "sk-...your-key...",
+  "openai_model": "gpt-5",
+  "ollama_url": "http://localhost:11434",
+  "ollama_model": "gemma3:27b",
+  "whisper_model": "large"
+}
+```
+Values are editable from the UI in `Audio_transcribe.py` and persisted back to this file.
+
+## App 1: Voice Note Analyst Pro 2.0 (`Audio_transcribe.py`)
+What it does
+- Batch transcribes selected audio files with Whisper (model selectable).
+- Analyzes transcripts via OpenAI Chat or Ollama to extract summary, calls_to_action, tone, people_mentioned, tags, and subject (JSON response enforced).
+- Persists everything into `voice_notes` table in `voice_notes_data.db`.
+- Library tab to search, preview, export to Markdown, and play audio files.
+
+Run
+```bash
+python Audio_transcribe.py
+```
+Flow
+1) Set provider (OpenAI/Ollama), keys/URLs, and Whisper model.  
+2) Add audio files, then **START PROCESSING**; progress shown per file.  
+3) Results saved to SQLite; use the Library tab to search, view details, export, or play audio.
+
+Notes
+- MPS fallback is enabled for macOS; CUDA is used when available, otherwise CPU.
+- Uses table `voice_notes` (schema below) and creates it if missing.
+
+## App 2: Voice Notes SQL Assistant (`voice_notes_query_gui.py`)
+What it does
+- Introspects any selected SQLite DB, lets you pick a table, and lists its fields.
+- Sends your plain-English prompt to OpenAI (`gpt-5`) to generate SELECT-only SQL with a default `LIMIT 200`.
+- Runs the SQL and shows results in a grid; you can edit the SQL before running.
+
+Run
+```bash
+python voice_notes_query_gui.py
+```
+Flow
+1) On launch, tries `voice_notes_data.db` (or `voice_notes_data.db.sql` if that’s all that’s present).  
+2) Use **Choose DB...** to point at another `.db/.sqlite` file; pick a table from the dropdown.  
+3) Enter a request, **Generate SQL**, review/edit, then **Run Query** to view results.
+
+Notes
+- Guardrails enforce SELECT/CTE only; disallowed keywords are blocked and a LIMIT is added if missing.
+- Works with arbitrary SQLite databases (table/field list updates when you switch).
+
+## Database Schema
+`voice_notes_data.db.sql` documents the `voice_notes` table:
+- id (INTEGER PK AUTOINCREMENT)
+- filename, file_path, date_recorded, date_processed
+- transcription, summary, calls_to_action, tone, people_mentioned, tags, subject
+- ai_provider, ai_model
+
+## Repo Hygiene
+- `.gitignore` keeps `vna_config.json`, `voice_notes_data.db`, and `audio/` out of git, along with common Python/IDE artifacts.
+- Do not commit API keys or real audio/transcript data.  

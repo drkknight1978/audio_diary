@@ -1,0 +1,5 @@
+ttkbootstrap>=1.6.0
+openai>=1.0.0
+openai-whisper>=20231117
+torch>=2.0.0
+requests>=2.31.0
